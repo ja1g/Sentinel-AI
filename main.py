@@ -53,12 +53,13 @@ def get_price_from_minutes_ago(history, minutes, current_time):
         key=lambda row: abs(row["timestamp"] - target_time)
     )
 
-    if abs(closest["timestamp"] - target_time) <= timedelta(minutes=2):
+    # Allow a wider time window for gaps in data collection
+    tolerance = max(3, minutes * 0.2)
+
+    if abs(closest["timestamp"] - target_time) <= timedelta(minutes=tolerance):
         return closest["price"]
 
     return None
-
-
 def movement_percent(current_price, old_price):
     if old_price is None or old_price == 0:
         return None
@@ -344,9 +345,77 @@ def get_sentinel_verdict(
     pullback_status,
     strategies
 ):
+    score = 50
     reasons = []
 
-    # Count strategy signals
+    bullish_count = list(trends.values()).count("BULLISH")
+    bearish_count = list(trends.values()).count("BEARISH")
+
+    # Base multi-timeframe analysis
+    if bullish_count == 4:
+        score += 30
+        reasons.append("all timeframes are bullish")
+    elif bullish_count == 3:
+        score += 20
+        reasons.append("most timeframes are bullish")
+    elif bullish_count == 2:
+        score += 10
+        reasons.append("short-term bullish confirmation")
+    elif bearish_count == 4:
+        score -= 30
+        reasons.append("all timeframes are bearish")
+    elif bearish_count == 3:
+        score -= 20
+        reasons.append("most timeframes are bearish")
+    elif bearish_count == 2:
+        score -= 10
+        reasons.append("bearish confirmation across timeframes")
+
+    # RSI
+    if rsi is not None:
+        if trends["1m"] == "BULLISH":
+            if rsi < 35:
+                score += 20
+                reasons.append("strong pullback within bullish trend")
+            elif rsi < 50:
+                score += 15
+                reasons.append("healthy pullback within bullish trend")
+            elif rsi <= 70:
+                score += 10
+                reasons.append("healthy bullish momentum")
+            elif rsi <= 80:
+                score -= 5
+                reasons.append("market becoming overextended")
+            else:
+                score -= 15
+                reasons.append("extremely overbought")
+
+        elif trends["1m"] == "BEARISH":
+            if rsi >= 40:
+                score -= 10
+                reasons.append("short-term bearish momentum")
+            elif rsi < 30:
+                score += 5
+                reasons.append("oversold - possible bounce")
+
+    # Momentum
+    if change_15 is not None:
+        if change_15 > 0.3 and bullish_count >= 2:
+            score += 5
+            reasons.append("15-minute momentum confirms bulls")
+        elif change_15 < -0.3 and bearish_count >= 2:
+            score -= 5
+            reasons.append("15-minute momentum confirms bears")
+
+    if change_60 is not None:
+        if change_60 > 0.5 and bullish_count >= 2:
+            score += 10
+            reasons.append("1-hour momentum confirms bulls")
+        elif change_60 < -0.5 and bearish_count >= 2:
+            score -= 10
+            reasons.append("1-hour momentum confirms bears")
+
+    # Strategy agreement bonus
     bullish_strategies = sum(
         1 for data in strategies.values()
         if data["signal"] == "BULLISH"
@@ -357,104 +426,56 @@ def get_sentinel_verdict(
         if data["signal"] == "BEARISH"
     )
 
-    waiting_strategies = sum(
-        1 for data in strategies.values()
-        if data["signal"] == "WAIT"
-    )
-
-    # Work out strategy agreement
     if bullish_strategies >= 2:
-        agreement = "BULLISH"
-        reasons.append(
-            f"{bullish_strategies} strategies agree on bullish conditions"
-        )
-    elif bearish_strategies >= 2:
-        agreement = "BEARISH"
-        reasons.append(
-            f"{bearish_strategies} strategies agree on bearish conditions"
-        )
-    else:
-        agreement = "NONE"
-        reasons.append("strategies do not have strong agreement")
+        score += 10
+        reasons.append("multiple strategies agree on bullish conditions")
 
-    # Start with neutral confidence
-    score = 50
+    if bearish_strategies >= 2:
+        score -= 10
+        reasons.append("multiple strategies agree on bearish conditions")
 
-    # Market regime is the first safety filter
-    if regime == "UNCLEAR":
-        score = 25
-        reasons.append("market regime is unclear")
+    # Regime protection
+    if regime == "HIGH VOLATILITY":
+        score -= 5
+        reasons.append("high volatility increases risk")
 
-    elif regime == "RANGING":
-        score = 30
-        reasons.append("market is ranging")
-
-    elif regime == "HIGH VOLATILITY":
-        score = 20
-        reasons.append("high volatility - risk elevated")
-
-    # Strong strategy agreement
-    elif agreement == "BULLISH" and regime == "TRENDING BULLISH":
-        score = 85
-        reasons.append("bullish strategies confirm bullish regime")
-
-    elif agreement == "BEARISH" and regime == "TRENDING BEARISH":
-        score = 85
-        reasons.append("bearish strategies confirm bearish regime")
-
-    # Partial confirmation
-    elif agreement == "BULLISH":
-        score = 65
-        reasons.append("strategies are bullish but regime is not fully confirmed")
-
-    elif agreement == "BEARISH":
-        score = 35
-        reasons.append("strategies are bearish but regime is not fully confirmed")
-
-    else:
-        score = 40
-        reasons.append("no confirmed trading opportunity")
-
-    # Data safety
-    if "COLLECTING" in trends.values():
-        score = min(score, 20)
-        verdict = "PRELIMINARY - COLLECTING DATA"
-        reasons.append("one or more timeframes are still collecting")
-
-    # Final decision
-    elif regime in ["UNCLEAR", "RANGING"]:
-        score = min(score, 40)
-        verdict = "NO TRADE"
-
-    elif agreement == "NONE":
-        score = min(score, 40)
-        verdict = "NO TRADE"
-
-    elif (
-        agreement == "BULLISH"
-        and regime == "TRENDING BULLISH"
-        and pullback_status == "PULLBACK CONFIRMED - BULLISH RE-ENTRY"
-    ):
-        score = max(score, 90)
-        verdict = "STRONG BUY SETUP"
-        reasons.append("bullish pullback re-entry confirmed")
-
-    elif agreement == "BULLISH" and regime == "TRENDING BULLISH":
-        verdict = "BULLISH CONDITIONS - WAIT FOR ENTRY"
-
-    elif agreement == "BEARISH" and regime == "TRENDING BEARISH":
-        verdict = "BEARISH CONDITIONS - AVOID LONGS"
-
-    elif agreement == "BULLISH":
-        verdict = "BULLISH BIAS - WAIT"
-
-    elif agreement == "BEARISH":
-        verdict = "BEARISH BIAS - WAIT"
-
-    else:
-        verdict = "NO TRADE"
+    elif regime == "UNCLEAR":
+        reasons.append("unclear market regime - avoid forcing trades")
 
     score = max(0, min(100, score))
+
+    # Verdict safety rules
+    if "COLLECTING" in trends.values():
+        verdict = "PRELIMINARY - COLLECTING DATA"
+
+    elif pullback_status in [
+        "OVERBOUGHT - WAIT FOR PULLBACK",
+        "WAITING FOR DEEPER PULLBACK",
+        "PULLBACK DETECTED - WAIT FOR CONFIRMATION"
+    ]:
+        verdict = "BULLISH - WAIT FOR PULLBACK"
+
+    elif regime == "UNCLEAR":
+        verdict = "NO TRADE - UNCLEAR"
+
+    elif pullback_status == "PULLBACK CONFIRMED - BULLISH RE-ENTRY":
+        verdict = "STRONG BUY SETUP"
+        reasons.append("bullish pullback confirmed")
+
+    elif score >= 80 and bullish_strategies >= 2:
+        verdict = "STRONG BUY SETUP"
+
+    elif score >= 65:
+        verdict = "BULLISH BIAS"
+
+    elif score <= 20 and bearish_strategies >= 2:
+        verdict = "STRONG SELL / AVOID"
+
+    elif score <= 40:
+        verdict = "BEARISH BIAS"
+
+    else:
+        verdict = "WAIT"
 
     return score, verdict, reasons
 
