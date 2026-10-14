@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -154,11 +154,16 @@ class PaperFund:
 
         snap = self.snapshot()
         notional = decision.quantity * decision.reference_price
-        if reason is None and notional > snap["equity"] * self.limits.max_position_fraction:
+        current_positions = {p["symbol"]: p["quantity"] for p in snap["positions"]}
+        current_quantity = current_positions.get(symbol, 0.0)
+        if reason is None and side == "SELL" and decision.quantity > current_quantity:
+            reason = "Paper fund cannot sell more units than it currently holds"
+        if reason is None and side == "BUY" and notional > snap["cash"]:
+            reason = "Insufficient cash for paper purchase"
+        if reason is None and side == "BUY" and notional > snap["equity"] * self.limits.max_position_fraction:
             reason = "Position exceeds per-position notional limit"
-        if reason is None and snap["gross_exposure"] + notional > (
-            snap["equity"] * self.limits.max_gross_exposure_fraction
-        ):
+        projected_gross = snap["gross_exposure"] + (notional if side == "BUY" else -min(notional, current_quantity * decision.reference_price))
+        if reason is None and projected_gross > snap["equity"] * self.limits.max_gross_exposure_fraction:
             reason = "Trade exceeds gross exposure limit"
         if reason is None and decision.stop_price is not None:
             risk = decision.quantity * abs(decision.reference_price - decision.stop_price)
