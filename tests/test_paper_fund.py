@@ -46,7 +46,7 @@ class PaperFundTests(unittest.TestCase):
         fund = PaperFund(Path(self.tmp.name) / "small.sqlite3",
                          limits=__import__("sentinel_fund.paper_fund", fromlist=["RiskLimits"]).RiskLimits(starting_cash=1_000))
         result = fund.submit_paper_decision(
-            Decision("BTC", "BUY", 0.02, 50_000, "Exceeds available cash")
+            Decision("BTC", "BUY", 0.03, 50_000, "Exceeds available cash")
         )
         self.assertFalse(result["accepted"])
         self.assertIn("Insufficient cash", result["reason"])
